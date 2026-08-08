@@ -1,0 +1,150 @@
+# gatewai.yaml — Gatewai configuration file
+#
+# Copy this file to gatewai.yaml (or pass -config) and set the environment
+# variables referenced below before starting the gateway.
+
+server:
+  host: "0.0.0.0"           # bind address
+  port: 8080                # listen port
+  read_timeout: "30s"       # max time to read a request (Go duration string)
+  write_timeout: "0s"       # MUST be 0 (disabled) — Go's WriteTimeout covers the
+                            # ENTIRE response lifetime. LLM streams can last minutes
+                            # (long reasoning). A non-zero value will sever active streams.
+                            # We rely on per-provider upstream timeouts + context cancellation.
+  graceful_shutdown: "30s"  # time to wait for in-flight requests on shutdown
+
+providers:
+  - name: "openai-1"               # UNIQUE instance name (used in routing, logs, metrics)
+    type: "openai"                 # provider type (selects which adapter to use)
+    api_key: "${OPENAI_API_KEY_1}" # environment variable interpolation
+    base_url: "https://api.openai.com/v1" # overridable for Azure, proxies, etc.
+    models:
+      - "gpt-4o"
+      - "gpt-4o-mini"
+    weight: 1                # for weighted load balancing (higher = more traffic)
+    max_retries: 2           # per-provider retry count (used by Phase 3 routing)
+    timeout: "60s"           # per-request timeout to this provider
+
+  - name: "openai-2"               # second OpenAI instance with different key
+    type: "openai"                 # same adapter, different credentials
+    api_key: "${OPENAI_API_KEY_2}"
+    base_url: "https://api.openai.com/v1"
+    models:
+      - "gpt-4o"
+    weight: 2                # gets 2x traffic vs openai-1
+    max_retries: 2
+    timeout: "60s"
+
+  # Phase 2 adds the anthropic and gemini adapters. Until then, instances of
+  # those types fail to start (no adapter registered). Uncomment when ready:
+  #
+  # - name: "anthropic-1"
+  #   type: "anthropic"
+  #   api_key: "${ANTHROPIC_API_KEY}"
+  #   base_url: "https://api.anthropic.com"
+  #   models:
+  #     - "claude-sonnet-4-20250514"
+  #     - "claude-haiku-4-20250414"
+  #   weight: 1
+  #   max_retries: 2
+  #   timeout: "60s"
+  #   default_max_tokens: 8192  # REQUIRED for anthropic (API mandates max_tokens);
+  #                             # MUST NOT be set for other provider types.
+  #
+  # - name: "gemini-1"
+  #   type: "gemini"
+  #   api_key: "${GEMINI_API_KEY}"
+  #   base_url: "https://generativelanguage.googleapis.com"
+  #   models:
+  #     - "gemini-2.5-pro"
+  #     - "gemini-2.5-flash"
+  #   weight: 1
+  #   max_retries: 2
+  #   timeout: "60s"
+
+# Model mapping for cross-provider failover (Phase 3).
+# When a provider is down and we fail over, this maps the requested model
+# to an equivalent model on the fallback provider.
+# Keys under each model are provider TYPES (not instance names).
+# Phase 1 has only openai configured, so anthropic/gemini entries are
+# commented out — validation rejects mappings to unconfigured types.
+model_mapping:
+  gpt-4o:
+    # anthropic: "claude-sonnet-4-20250514"   # uncomment with Phase 2/3
+    # gemini: "gemini-2.5-pro"
+  gpt-4o-mini:
+    # anthropic: "claude-haiku-4-20250414"
+    # gemini: "gemini-2.5-flash"
+
+routing:
+  strategy: "round-robin"       # "round-robin" | "weighted" | "least-latency"
+  fallback_order:               # provider TYPES (NOT instance names)
+    - "openai"                  # only types actually configured are allowed
+    # - "anthropic"             # uncomment with Phase 2/3
+    # - "gemini"
+  circuit_breaker:
+    failure_threshold: 5        # consecutive failures before opening circuit
+    recovery_timeout: "30s"     # how long to wait before trying half-open
+    half_open_max_requests: 3   # requests to allow in half-open state
+
+rate_limiting:                  # Phase 4 (validated but unused until then)
+  enabled: false
+  backend: "memory"             # "memory" | "redis"
+  tpm_estimation: "char_estimate" # "char_estimate" | "tokenizer"
+  global:
+    rpm: 1000
+    tpm: 500000
+  per_key:
+    rpm: 100
+    tpm: 50000
+
+cache:                          # Phase 4 (validated but unused until then)
+  enabled: false
+  backend: "memory"             # "memory" | "redis"
+  exact_match:
+    ttl: "1h"
+    max_entries: 10000
+  semantic:
+    enabled: false
+    similarity_threshold: 0.92  # cosine similarity threshold (0.0 - 1.0)
+    embedding_provider: "openai-1" # provider INSTANCE name (NOT type)
+    embedding_model: "text-embedding-3-small"
+    ttl: "24h"
+
+# Only needed if any backend is set to "redis". Unset variables are NOT
+# resolved (and not an error) while redis is unused.
+redis:
+  address: "localhost:6379"
+  password: "${REDIS_PASSWORD}"
+  db: 0
+  pool_size: 100
+
+virtual_keys:                   # Phase 4 (validated but unused until then)
+  enabled: false
+  keys:
+    - key: "gw-team-frontend"
+      description: "Frontend team"
+      allowed_models: ["gpt-4o-mini", "claude-haiku-4-20250414"]
+      rate_limit:
+        rpm: 50
+        tpm: 25000
+    - key: "gw-team-backend"
+      description: "Backend team"
+      allowed_models: ["*"]     # all models
+      rate_limit:
+        rpm: 200
+        tpm: 100000
+
+guardrails:                     # Phase 6 (validated but unused until then)
+  pre_request: []               # guards to run before sending to provider
+  post_response: []             # guards to run before returning to client
+  buffer_mode: false            # if true, streaming responses are fully buffered
+                                # before post-response guards run.
+
+logging:
+  level: "info"                 # "debug" | "info" | "warn" | "error"
+  format: "json"                # "json" | "text"
+
+metrics:                        # Phase 5
+  enabled: false
+  path: "/metrics"              # Prometheus scrape endpoint

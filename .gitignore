@@ -1,0 +1,15 @@
+# Binaries and build output
+bin/
+*.exe
+
+# Local config files (contain real API keys via env refs; the example is safe)
+gatewai.yaml
+configs/gatewai.yaml
+
+# Test artifacts
+coverage.out
+*.test
+
+# Editor
+.vscode/
+.idea/
