@@ -21,6 +21,23 @@ func RequestContextFrom(ctx context.Context) *RequestContext {
 	return rc
 }
 
+// streamStateKey is the context key for per-stream translation state.
+type streamStateKey struct{}
+
+// WithStreamState stores a provider's per-stream SSE translation state.
+// Providers whose streams need cross-chunk state (e.g. Anthropic's tool_use
+// block mapping) keep it here for the duration of one streamed response.
+// The proxy creates the state once per stream via the adapter.
+func WithStreamState(ctx context.Context, s any) context.Context {
+	return context.WithValue(ctx, streamStateKey{}, s)
+}
+
+// StreamStateFrom retrieves the stream state stored by WithStreamState.
+// Returns nil if none was stored.
+func StreamStateFrom(ctx context.Context) any {
+	return ctx.Value(streamStateKey{})
+}
+
 // RequestContext carries metadata through the middleware chain.
 // It lives in the schema package because schema imports nothing, so every
 // package (middleware, proxy, router) can depend on it without circular imports.

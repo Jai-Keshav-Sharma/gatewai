@@ -35,53 +35,60 @@ providers:
     max_retries: 2
     timeout: "60s"
 
-  # Phase 2 adds the anthropic and gemini adapters. Until then, instances of
-  # those types fail to start (no adapter registered). Uncomment when ready:
-  #
-  # - name: "anthropic-1"
-  #   type: "anthropic"
-  #   api_key: "${ANTHROPIC_API_KEY}"
-  #   base_url: "https://api.anthropic.com"
-  #   models:
-  #     - "claude-sonnet-4-20250514"
-  #     - "claude-haiku-4-20250414"
-  #   weight: 1
-  #   max_retries: 2
-  #   timeout: "60s"
-  #   default_max_tokens: 8192  # REQUIRED for anthropic (API mandates max_tokens);
-  #                             # MUST NOT be set for other provider types.
-  #
-  # - name: "gemini-1"
-  #   type: "gemini"
-  #   api_key: "${GEMINI_API_KEY}"
-  #   base_url: "https://generativelanguage.googleapis.com"
-  #   models:
-  #     - "gemini-2.5-pro"
-  #     - "gemini-2.5-flash"
-  #   weight: 1
-  #   max_retries: 2
-  #   timeout: "60s"
+  - name: "anthropic-1"
+    type: "anthropic"
+    api_key: "${ANTHROPIC_API_KEY}"
+    base_url: "https://api.anthropic.com"
+    models:
+      - "claude-sonnet-4-20250514"
+      - "claude-haiku-4-20250414"
+    weight: 1
+    max_retries: 2
+    timeout: "60s"
+    default_max_tokens: 8192  # REQUIRED for anthropic (API mandates max_tokens);
+                              # MUST NOT be set for other provider types.
+
+  - name: "gemini-1"
+    type: "gemini"
+    api_key: "${GEMINI_API_KEY}"
+    base_url: "https://generativelanguage.googleapis.com"
+    models:
+      - "gemini-2.5-pro"
+      - "gemini-2.5-flash"
+    weight: 1
+    max_retries: 2
+    timeout: "60s"
 
 # Model mapping for cross-provider failover (Phase 3).
 # When a provider is down and we fail over, this maps the requested model
 # to an equivalent model on the fallback provider.
 # Keys under each model are provider TYPES (not instance names).
-# Phase 1 has only openai configured, so anthropic/gemini entries are
-# commented out — validation rejects mappings to unconfigured types.
 model_mapping:
   gpt-4o:
-    # anthropic: "claude-sonnet-4-20250514"   # uncomment with Phase 2/3
-    # gemini: "gemini-2.5-pro"
+    anthropic: "claude-sonnet-4-20250514"
+    gemini: "gemini-2.5-pro"
   gpt-4o-mini:
-    # anthropic: "claude-haiku-4-20250414"
-    # gemini: "gemini-2.5-flash"
+    anthropic: "claude-haiku-4-20250414"
+    gemini: "gemini-2.5-flash"
+  claude-sonnet-4-20250514:
+    openai: "gpt-4o"
+    gemini: "gemini-2.5-pro"
+  claude-haiku-4-20250414:
+    openai: "gpt-4o-mini"
+    gemini: "gemini-2.5-flash"
+  gemini-2.5-pro:
+    openai: "gpt-4o"
+    anthropic: "claude-sonnet-4-20250514"
+  gemini-2.5-flash:
+    openai: "gpt-4o-mini"
+    anthropic: "claude-haiku-4-20250414"
 
 routing:
   strategy: "round-robin"       # "round-robin" | "weighted" | "least-latency"
   fallback_order:               # provider TYPES (NOT instance names)
-    - "openai"                  # only types actually configured are allowed
-    # - "anthropic"             # uncomment with Phase 2/3
-    # - "gemini"
+    - "openai"
+    - "anthropic"
+    - "gemini"
   circuit_breaker:
     failure_threshold: 5        # consecutive failures before opening circuit
     recovery_timeout: "30s"     # how long to wait before trying half-open

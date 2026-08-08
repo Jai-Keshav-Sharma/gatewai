@@ -97,6 +97,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		schema.NewInternalError("failed to parse provider response: " + err.Error()).WriteJSON(w)
 		return
 	}
+	if ur.Model == "" {
+		// Some providers (Gemini) don't echo the model name; the request's
+		// model is the truthful answer.
+		ur.Model = req.Model
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(ur); err != nil {

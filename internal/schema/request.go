@@ -5,7 +5,10 @@
 // proxy, router) can depend on it without creating import cycles.
 package schema
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // UnifiedRequest is the internal representation of a chat completion request.
 // It mirrors the OpenAI format since that's our canonical API.
@@ -93,4 +96,72 @@ type FunctionCall struct {
 type ResponseFormat struct {
 	Type       string `json:"type"`
 	JSONSchema any    `json:"json_schema,omitempty"`
+}
+
+// BuildOptions carries per-INSTANCE values a provider adapter needs to build
+// a provider-native request. Adapters are shared by every instance of a
+// type, so instance-specific values must arrive per call. It lives in schema
+// (the dependency base) so adapters never need to import the provider package.
+type BuildOptions struct {
+	APIKey           string
+	BaseURL          string
+	DefaultMaxTokens int // injected by adapters whose provider mandates max_tokens (Anthropic)
+}
+
+// ContentPart is a normalized piece of message content.
+// OpenAI allows Message.Content to be either a bare string or an array of
+// parts ({"type":"text","text":...} or {"type":"image_url",...}). Since the
+// field is `any`, adapters would each have to reimplement the interpretation
+// of both shapes — this helper centralizes it once, here, for every adapter.
+type ContentPart struct {
+	Type     string // "text" | "image"
+	Text     string
+	ImageURL string
+}
+
+// ContentParts normalizes Message.Content into a list of discrete parts.
+func ContentParts(content any) []ContentPart {
+	switch c := content.(type) {
+	case string:
+		if c == "" {
+			return nil
+		}
+		return []ContentPart{{Type: "text", Text: c}}
+	case []any:
+		var parts []ContentPart
+		for _, p := range c {
+			m, ok := p.(map[string]any)
+			if !ok {
+				continue
+			}
+			switch m["type"] {
+			case "text":
+				if t, ok := m["text"].(string); ok {
+					parts = append(parts, ContentPart{Type: "text", Text: t})
+				}
+			case "image_url":
+				if img, ok := m["image_url"].(map[string]any); ok {
+					if u, ok := img["url"].(string); ok {
+						parts = append(parts, ContentPart{Type: "image", ImageURL: u})
+					}
+				}
+			}
+		}
+		return parts
+	default:
+		return nil
+	}
+}
+
+// ContentText returns the plain-text rendering of content: the concatenation
+// of all text parts. Used for system prompts, tool results, and anywhere a
+// provider needs a flat string instead of parts.
+func ContentText(content any) string {
+	var sb strings.Builder
+	for _, p := range ContentParts(content) {
+		if p.Type == "text" {
+			sb.WriteString(p.Text)
+		}
+	}
+	return sb.String()
 }

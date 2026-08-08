@@ -45,6 +45,10 @@ func (h *Handler) stream(w http.ResponseWriter, resp *http.Response, inst *provi
 	scanner.Buffer(*buf, maxSSELine)
 	defer pool.ByteBufferPool.Put(buf)
 
+	// Per-stream translation state for stateful adapters (Anthropic tool_use
+	// mapping, Gemini tool indices). Stateless adapters (OpenAI) get nil.
+	ctx = schema.WithStreamState(ctx, inst.NewStreamState())
+
 	// Read the upstream stream line by line. ScanLines yields each line
 	// without its trailing "\n" (and strips a trailing "\r"), so we re-add
 	// the newline after every forwarded line. Blank lines become "\n", which
@@ -71,11 +75,18 @@ func (h *Handler) stream(w http.ResponseWriter, resp *http.Response, inst *provi
 		fl.Flush()
 	}
 
-	// scanner.Err() is non-nil if the upstream connection broke or was
-	// cancelled mid-stream. Chunks are already delivered; there is nothing
-	// recoverable to send, so we just stop. On a clean EOF, the stream
-	// (including the final "data: [DONE]") was already forwarded.
-	_ = scanner.Err()
+	// scanner.Err() is nil on a CLEAN EOF. Providers that never send their own
+	// terminal marker (Gemini) get one synthesized here so the client always
+	// sees a well-formed OpenAI stream ("data: [DONE]\n\n"). On an aborted
+	// stream (upstream break or client disconnect) chunks are already
+	// delivered; nothing recoverable remains, so we just stop.
+	if err := scanner.Err(); err == nil {
+		if marker := inst.EndOfStream(); marker != nil {
+			if _, err := w.Write(marker); err == nil {
+				fl.Flush()
+			}
+		}
+	}
 }
 
 // newline avoids re-allocating a 1-byte slice per chunk.

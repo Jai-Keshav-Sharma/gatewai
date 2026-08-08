@@ -24,8 +24,8 @@ func (a *Adapter) Name() string { return "openai" }
 // BuildRequest converts a unified request into an OpenAI HTTP request.
 // The endpoint is baseURL + "/chat/completions"; baseURL comes from the
 // instance's config (overridable for Azure, proxies, mock servers, etc.).
-func (a *Adapter) BuildRequest(ctx context.Context, req *schema.UnifiedRequest, apiKey, baseURL string) (*http.Request, error) {
-	endpoint := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
+func (a *Adapter) BuildRequest(ctx context.Context, req *schema.UnifiedRequest, opts schema.BuildOptions) (*http.Request, error) {
+	endpoint := strings.TrimSuffix(opts.BaseURL, "/") + "/chat/completions"
 
 	// Our schema IS the OpenAI wire format, so marshaling the unified request
 	// produces a byte-for-byte compatible body (including stream: true).
@@ -39,7 +39,7 @@ func (a *Adapter) BuildRequest(ctx context.Context, req *schema.UnifiedRequest, 
 		return nil, fmt.Errorf("openai: build request: %w", err)
 	}
 	hreq.Header.Set("Content-Type", "application/json")
-	hreq.Header.Set("Authorization", "Bearer "+apiKey)
+	hreq.Header.Set("Authorization", "Bearer "+opts.APIKey)
 	if req.Stream {
 		hreq.Header.Set("Accept", "text/event-stream")
 	}

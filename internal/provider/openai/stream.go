@@ -9,3 +9,9 @@ import "context"
 func (a *Adapter) TranslateStreamChunk(ctx context.Context, chunk []byte) ([]byte, error) {
 	return chunk, nil
 }
+
+// NewStreamState returns nil — OpenAI translation is stateless passthrough.
+func (a *Adapter) NewStreamState() any { return nil }
+
+// EndOfStream returns nil — OpenAI sends its own "data: [DONE]" marker.
+func (a *Adapter) EndOfStream() []byte { return nil }

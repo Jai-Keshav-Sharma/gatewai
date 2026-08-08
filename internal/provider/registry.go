@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/config"
+	"github.com/Jai-Keshav-Sharma/gatewai/internal/provider/anthropic"
+	"github.com/Jai-Keshav-Sharma/gatewai/internal/provider/gemini"
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/provider/openai"
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/schema"
 )
@@ -16,14 +18,29 @@ import (
 // that type — two OpenAI instances with different keys reuse one adapter.
 // The only thing that differs between instances is configuration (name, key,
 // base URL, models), which lives on Instance, not on the adapter.
+//
+// NOTE: BuildOptions lives in the schema package (not here) so adapters can
+// depend on schema without importing provider — which would create an import
+// cycle (provider imports the adapters).
 type formatAdapter interface {
 	Name() string
-	// BuildRequest includes baseURL because the adapter is shared and the
-	// endpoint differs per instance. The public Provider interface keeps the
-	// plan's exact signature; Instance injects its own baseURL here.
-	BuildRequest(ctx context.Context, req *schema.UnifiedRequest, apiKey, baseURL string) (*http.Request, error)
+	BuildRequest(ctx context.Context, req *schema.UnifiedRequest, opts schema.BuildOptions) (*http.Request, error)
 	ParseResponse(ctx context.Context, resp *http.Response) (*schema.UnifiedResponse, error)
+
+	// TranslateStreamChunk converts a single provider SSE line into OpenAI
+	// format. Returns nil if the line should be skipped.
 	TranslateStreamChunk(ctx context.Context, chunk []byte) ([]byte, error)
+
+	// EndOfStream returns the bytes to write when the upstream stream closes
+	// cleanly, for providers that never send a terminal marker themselves
+	// (Gemini). Providers that end their own stream (OpenAI sends "data:
+	// [DONE]", Anthropic emits it on message_stop) return nil.
+	EndOfStream() []byte
+
+	// NewStreamState creates the per-stream state for stateful translation
+	// (e.g. Anthropic's tool_use index mapping). Stateless adapters return nil.
+	NewStreamState() any
+
 	Models() []schema.Model
 	SupportsStreaming() bool
 }
@@ -32,13 +49,14 @@ type formatAdapter interface {
 // It satisfies the Provider interface: the adapter does the format
 // translation, the instance provides the identity and per-instance config.
 type Instance struct {
-	name       string
-	apiKey     string
-	baseURL    string
-	timeout    time.Duration
-	maxRetries int
-	models     []string // model IDs this instance is allowed to serve
-	adapter    formatAdapter
+	name             string
+	apiKey           string
+	baseURL          string
+	timeout          time.Duration
+	maxRetries       int
+	defaultMaxTokens int
+	models           []string // model IDs this instance is allowed to serve
+	adapter          formatAdapter
 }
 
 // compile-time check: Instance satisfies the Provider interface.
@@ -56,7 +74,11 @@ func (i *Instance) Timeout() time.Duration { return i.timeout }
 func (i *Instance) MaxRetries() int { return i.maxRetries }
 
 func (i *Instance) BuildRequest(ctx context.Context, req *schema.UnifiedRequest, apiKey string) (*http.Request, error) {
-	return i.adapter.BuildRequest(ctx, req, apiKey, i.baseURL)
+	return i.adapter.BuildRequest(ctx, req, schema.BuildOptions{
+		APIKey:           apiKey,
+		BaseURL:          i.baseURL,
+		DefaultMaxTokens: i.defaultMaxTokens,
+	})
 }
 
 func (i *Instance) ParseResponse(ctx context.Context, resp *http.Response) (*schema.UnifiedResponse, error) {
@@ -66,6 +88,14 @@ func (i *Instance) ParseResponse(ctx context.Context, resp *http.Response) (*sch
 func (i *Instance) TranslateStreamChunk(ctx context.Context, chunk []byte) ([]byte, error) {
 	return i.adapter.TranslateStreamChunk(ctx, chunk)
 }
+
+// EndOfStream returns the terminal marker bytes for providers that need one,
+// or nil for providers that end their own stream.
+func (i *Instance) EndOfStream() []byte { return i.adapter.EndOfStream() }
+
+// NewStreamState creates a per-stream translation state, or nil if the
+// adapter is stateless.
+func (i *Instance) NewStreamState() any { return i.adapter.NewStreamState() }
 
 func (i *Instance) SupportsStreaming() bool { return i.adapter.SupportsStreaming() }
 
@@ -98,10 +128,12 @@ type Registry struct {
 
 // NewRegistry builds the registry from configuration. The type→adapter
 // mapping is registered here — adding a provider type means registering its
-// adapter in this function (Phase 2 adds anthropic and gemini).
+// adapter in this function.
 func NewRegistry(cfg *config.Config) (*Registry, error) {
 	adapters := map[string]formatAdapter{
-		"openai": &openai.Adapter{},
+		"openai":    &openai.Adapter{},
+		"anthropic": &anthropic.Adapter{},
+		"gemini":    &gemini.Adapter{},
 	}
 	reg := &Registry{
 		instances: make(map[string]*Instance, len(cfg.Providers)),
@@ -112,14 +144,19 @@ func NewRegistry(cfg *config.Config) (*Registry, error) {
 		if !ok {
 			return nil, fmt.Errorf("no adapter registered for provider type %q", pc.Type)
 		}
+		var defaultMaxTokens int
+		if pc.DefaultMaxTokens != nil {
+			defaultMaxTokens = *pc.DefaultMaxTokens
+		}
 		inst := &Instance{
-			name:       pc.Name,
-			apiKey:     string(pc.APIKey),
-			baseURL:    pc.BaseURL,
-			timeout:    time.Duration(pc.Timeout),
-			maxRetries: pc.MaxRetries,
-			models:     pc.Models,
-			adapter:    adapter,
+			name:             pc.Name,
+			apiKey:           string(pc.APIKey),
+			baseURL:          pc.BaseURL,
+			timeout:          time.Duration(pc.Timeout),
+			maxRetries:       pc.MaxRetries,
+			defaultMaxTokens: defaultMaxTokens,
+			models:           pc.Models,
+			adapter:          adapter,
 		}
 		reg.instances[inst.name] = inst
 		for _, m := range pc.Models {
@@ -145,7 +182,7 @@ func (r *Registry) Instances() []*Instance {
 }
 
 // Resolve returns an instance that serves the requested model.
-// Phase 1: returns the FIRST configured instance serving the model.
+// Phase 1/2: returns the FIRST configured instance serving the model.
 // Phase 3 replaces this with the full router (strategies + failover).
 func (r *Registry) Resolve(model string) (*Instance, bool) {
 	candidates := r.byModel[model]
