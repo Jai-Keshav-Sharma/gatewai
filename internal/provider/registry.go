@@ -71,6 +71,9 @@ func (i *Instance) Type() string { return i.adapter.Name() }
 // APIKey returns this instance's provider API key (Phase 1: direct from config).
 func (i *Instance) APIKey() string { return i.apiKey }
 
+// BaseURL returns this instance's configured upstream base URL.
+func (i *Instance) BaseURL() string { return i.baseURL }
+
 // Timeout returns the per-request timeout for this instance.
 func (i *Instance) Timeout() time.Duration { return i.timeout }
 

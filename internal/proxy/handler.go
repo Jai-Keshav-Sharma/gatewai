@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/Jai-Keshav-Sharma/gatewai/internal/cache"
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/pool"
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/router"
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/schema"
@@ -62,6 +63,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	inst := res.Instance
 	rc.Provider = inst.Name()
+	rc.ResolvedKey = inst.APIKey()
 
 	resp := res.Resp
 	defer resp.Body.Close()
@@ -88,12 +90,29 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// model is the truthful answer.
 		ur.Model = req.Model
 	}
+
+	// Token accounting feeds the TPM post-charge hook (§4.1 step 11) — and
+	// the cache store picks the finished response out of the shared slot.
+	recordTokens(rc, ur.Usage)
+	if slot := cache.ResponseSlotFrom(r.Context()); slot != nil {
+		slot.Set(ur)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(ur); err != nil {
 		// Client disconnected mid-write; nothing more we can do.
 		return
 	}
+}
+
+// recordTokens copies usage into the RequestContext when present.
+func recordTokens(rc *schema.RequestContext, usage *schema.Usage) {
+	if usage == nil {
+		return
+	}
+	rc.TokensIn = usage.PromptTokens
+	rc.TokensOut = usage.CompletionTokens
 }
 
 // passthrough forwards a non-2xx upstream response to the client unchanged.

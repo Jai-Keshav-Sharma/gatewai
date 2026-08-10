@@ -35,7 +35,10 @@ func main() {
 
 	// The upstream transport is a shared singleton (§10.1).
 	transport := server.NewUpstreamTransport()
-	handler := server.NewRoutes(cfg, reg, transport)
+	handler, err := server.NewRoutes(cfg, reg, transport)
+	if err != nil {
+		fatal("failed to wire routes", err)
+	}
 	srv := server.NewServer(cfg.Server, handler)
 
 	go func() {

@@ -1,26 +1,76 @@
 package server
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
+	"strings"
+	"time"
 
+	"github.com/Jai-Keshav-Sharma/gatewai/internal/cache"
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/config"
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/middleware"
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/provider"
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/proxy"
+	"github.com/Jai-Keshav-Sharma/gatewai/internal/ratelimit"
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/router"
+	"github.com/Jai-Keshav-Sharma/gatewai/internal/virtualkey"
+	"github.com/redis/go-redis/v9"
 )
 
-// NewRoutes registers all routes and composes the middleware chain (§4.1).
-//
-// The chain grows phase by phase: Phase 1 has only the body parser. Later
-// phases insert request-id, logging, metrics, auth, rate limiting and cache
-// middlewares — in the exact order defined by the plan — via this function.
-func NewRoutes(cfg *config.Config, reg *provider.Registry, transport *http.Transport) http.Handler {
+// NewRoutes registers all routes and composes the middleware chain in the
+// exact §4.1 order: bodyparser (0) → auth (4) → rate limit (5) → cache (6) →
+// proxy handler. Later phases insert request-id, logging, metrics and
+// guardrails into their positions.
+func NewRoutes(cfg *config.Config, reg *provider.Registry, transport *http.Transport) (http.Handler, error) {
 	mux := http.NewServeMux()
 
-	chat := proxy.NewHandler(router.New(cfg, reg, transport))
-	mux.Handle("POST /v1/chat/completions", middleware.Chain(chat, middleware.BodyParser))
+	// --- Governance wiring (Phase 4) ---
+
+	keyStore, err := virtualkey.NewStore(cfg.VirtualKeys)
+	if err != nil {
+		return nil, err
+	}
+
+	redisClient, err := buildRedis(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	limiter, limits, err := buildLimiter(cfg, keyStore, redisClient)
+	if err != nil {
+		return nil, err
+	}
+
+	c, err := buildCache(cfg, reg, redisClient, transport)
+	if err != nil {
+		return nil, err
+	}
+
+	var chat http.Handler = proxy.NewHandler(router.New(cfg, reg, transport))
+	est, err := estimator(cfg)
+	if err != nil {
+		return nil, err
+	}
+	chat = middleware.Chain(chat,
+		middleware.BodyParser,
+		middleware.Auth(cfg.VirtualKeys.Enabled, keyStore),
+		middleware.NewRateLimit(limiter, cfg.RateLimiting.Enabled,
+			est,
+			"global", "global:tpm",
+			keyDim, keyTPMDim,
+			limitFor(cfg, limits),
+		).Middleware(),
+		middleware.NewCache(c, cfg.Cache.Enabled,
+			time.Duration(cfg.Cache.ExactMatch.TTL),
+			cfg.Cache.Semantic.Enabled,
+			cfg.Cache.Semantic.SimilarityThreshold,
+			embedderFor(cfg, reg, transport),
+			time.Duration(cfg.Cache.Semantic.TTL),
+		).Middleware(),
+	)
+	mux.Handle("POST /v1/chat/completions", chat)
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -28,5 +78,112 @@ func NewRoutes(cfg *config.Config, reg *provider.Registry, transport *http.Trans
 		fmt.Fprint(w, `{"status":"ok"}`)
 	})
 
-	return mux
+	return mux, nil
+}
+
+// keyDim hashes the bearer key so key material never lands in map keys or
+// Redis keys (§5.4 SECURITY rule).
+func keyDim(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return "key:" + hex.EncodeToString(sum[:])
+}
+
+func keyTPMDim(key string) string {
+	return keyDim(key) + ":tpm"
+}
+
+// buildRedis creates the shared Redis client when any backend uses it.
+func buildRedis(cfg *config.Config) (*redis.Client, error) {
+	if cfg.RateLimiting.Backend != "redis" && cfg.Cache.Backend != "redis" {
+		return nil, nil
+	}
+	return redis.NewClient(&redis.Options{
+		Addr:     cfg.Redis.Address,
+		Password: string(cfg.Redis.Password),
+		DB:       cfg.Redis.DB,
+		PoolSize: cfg.Redis.PoolSize,
+	}), nil
+}
+
+// buildLimiter constructs the limiter and the dimension → limit map.
+func buildLimiter(cfg *config.Config, store *virtualkey.Store, redisClient *redis.Client) (ratelimit.Limiter, map[string]int, error) {
+	limits := map[string]int{
+		"global":     cfg.RateLimiting.Global.RPM,
+		"global:tpm": cfg.RateLimiting.Global.TPM,
+	}
+	// Per-key dimensions, one pair per configured virtual key.
+	for _, k := range cfg.VirtualKeys.Keys {
+		rpm := k.RateLimit.RPM
+		if rpm <= 0 {
+			rpm = cfg.RateLimiting.PerKey.RPM
+		}
+		tpm := k.RateLimit.TPM
+		if tpm <= 0 {
+			tpm = cfg.RateLimiting.PerKey.TPM
+		}
+		limits[keyDim(k.Key)] = rpm
+		limits[keyTPMDim(k.Key)] = tpm
+	}
+	if cfg.RateLimiting.Backend == "redis" {
+		return ratelimit.NewRedis(redisClient, limits, cfg.RateLimiting.PerKey.RPM, cfg.RateLimiting.PerKey.TPM, time.Minute), limits, nil
+	}
+	return ratelimit.NewMemory(limits, cfg.RateLimiting.PerKey.RPM, cfg.RateLimiting.PerKey.TPM), limits, nil
+}
+
+// estimator returns the TPM estimation strategy from config.
+func estimator(cfg *config.Config) (middleware.Estimator, error) {
+	if cfg.RateLimiting.TPMEstimation == "tokenizer" {
+		return nil, fmt.Errorf("rate_limiting.tpm_estimation: \"tokenizer\" is not implemented yet — use \"char_estimate\"")
+	}
+	return middleware.CharEstimator{}, nil
+}
+
+// limitFor resolves the numeric limit for a dimension, falling back to the
+// per-key defaults for dimensions that were not pre-registered (virtual keys
+// disabled).
+func limitFor(cfg *config.Config, limits map[string]int) func(string) int {
+	return func(dimension string) int {
+		if v, ok := limits[dimension]; ok {
+			return v
+		}
+		if strings.HasSuffix(dimension, ":tpm") {
+			return cfg.RateLimiting.PerKey.TPM
+		}
+		return cfg.RateLimiting.PerKey.RPM
+	}
+}
+
+// buildCache constructs the configured cache backend and wraps it with the
+// semantic store when enabled.
+func buildCache(cfg *config.Config, reg *provider.Registry, redisClient *redis.Client, transport *http.Transport) (cache.Cache, error) {
+	if !cfg.Cache.Enabled {
+		return nil, nil
+	}
+	var c cache.Cache
+	if cfg.Cache.Backend == "redis" {
+		c = cache.NewRedis(redisClient)
+	} else {
+		c = cache.NewMemory(cfg.Cache.ExactMatch.MaxEntries)
+	}
+	if cfg.Cache.Semantic.Enabled {
+		if cfg.Cache.Backend == "redis" {
+			return nil, fmt.Errorf("cache.semantic with redis backend (Redis VSS) is not implemented yet — use \"memory\" or disable semantic caching")
+		}
+		c = cache.NewMemorySemantic(c)
+	}
+	return c, nil
+}
+
+// embedderFor builds the embeddings client for semantic caching (§7: the
+// embedding_provider is an INSTANCE — keys and base URL come from it).
+func embedderFor(cfg *config.Config, reg *provider.Registry, transport *http.Transport) cache.Embedder {
+	if !cfg.Cache.Enabled || !cfg.Cache.Semantic.Enabled {
+		return nil
+	}
+	inst, ok := reg.Get(cfg.Cache.Semantic.EmbeddingProvider)
+	if !ok {
+		return nil // unreachable: config validation guarantees the instance exists
+	}
+	return cache.NewHTTPEmbedder(inst.BaseURL(), inst.APIKey(), cfg.Cache.Semantic.EmbeddingModel,
+		&http.Client{Transport: transport})
 }

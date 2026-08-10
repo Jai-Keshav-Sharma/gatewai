@@ -5,6 +5,7 @@ import (
 	"context"
 	"net/http"
 
+	"github.com/Jai-Keshav-Sharma/gatewai/internal/cache"
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/pool"
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/provider"
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/schema"
@@ -49,6 +50,12 @@ func (h *Handler) stream(w http.ResponseWriter, resp *http.Response, inst *provi
 	// mapping, Gemini tool indices). Stateless adapters (OpenAI) get nil.
 	ctx = schema.WithStreamState(ctx, inst.NewStreamState())
 
+	// If caching is enabled, the cache middleware attached an accumulator:
+	// tee every translated chunk into it so the completed stream can be
+	// stored after [DONE] (§4.3). The reconstructed response is published
+	// via cache.WithStoredResponse for the middleware to pick up.
+	acc := cache.AccumulatorFrom(ctx)
+
 	// Read the upstream stream line by line. ScanLines yields each line
 	// without its trailing "\n" (and strips a trailing "\r"), so we re-add
 	// the newline after every forwarded line. Blank lines become "\n", which
@@ -72,6 +79,9 @@ func (h *Handler) stream(w http.ResponseWriter, resp *http.Response, inst *provi
 		if _, err := w.Write(newline); err != nil {
 			return
 		}
+		if acc != nil {
+			acc.Add(translated) // tee for caching
+		}
 		fl.Flush()
 	}
 
@@ -85,6 +95,16 @@ func (h *Handler) stream(w http.ResponseWriter, resp *http.Response, inst *provi
 			if _, err := w.Write(marker); err == nil {
 				fl.Flush()
 			}
+		}
+	}
+
+	// Publish the reconstructed response for the cache store (only on a
+	// clean stream — aborted streams carry no cached content).
+	if acc != nil && scanner.Err() == nil {
+		ur := acc.Response()
+		recordTokens(schema.RequestContextFrom(ctx), ur.Usage)
+		if slot := cache.ResponseSlotFrom(ctx); slot != nil {
+			slot.Set(ur)
 		}
 	}
 }

@@ -36,6 +36,7 @@ type StreamChunk struct {
 	Created int64          `json:"created"`
 	Model   string         `json:"model"`
 	Choices []StreamChoice `json:"choices"`
+	Usage   *Usage         `json:"usage,omitempty"` // present with stream_options.include_usage
 }
 
 // StreamChoice is one candidate slot inside a StreamChunk.

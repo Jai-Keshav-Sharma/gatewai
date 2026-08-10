@@ -94,25 +94,31 @@ routing:
     recovery_timeout: "30s"     # how long to wait before trying half-open
     half_open_max_requests: 3   # requests to allow in half-open state
 
-rate_limiting:                  # Phase 4 (validated but unused until then)
-  enabled: false
+rate_limiting:
+  enabled: true
   backend: "memory"             # "memory" | "redis"
-  tpm_estimation: "char_estimate" # "char_estimate" | "tokenizer"
+  # TPM estimation strategy: how to estimate prompt tokens BEFORE the request is sent.
+  # This is needed because rate limiting runs pre-request but token counts are post-response.
+  # Options:
+  #   "char_estimate" — approximate: 1 token ≈ 4 characters (fast, no dependencies)
+  #   "tokenizer"     — accurate: uses tiktoken-go for OpenAI (not yet implemented)
+  tpm_estimation: "char_estimate"
   global:
-    rpm: 1000
-    tpm: 500000
+    rpm: 1000                   # requests per minute (all keys combined)
+    tpm: 500000                 # tokens per minute (all keys combined)
   per_key:
-    rpm: 100
-    tpm: 50000
+    rpm: 100                    # default per virtual key
+    tpm: 50000                  # default per virtual key
 
-cache:                          # Phase 4 (validated but unused until then)
-  enabled: false
+cache:
+  enabled: true
   backend: "memory"             # "memory" | "redis"
   exact_match:
-    ttl: "1h"
-    max_entries: 10000
+    ttl: "1h"                   # how long to cache exact matches
+    max_entries: 10000          # max items in cache (LRU eviction)
   semantic:
-    enabled: false
+    enabled: false              # memory backend: brute-force cosine similarity;
+                                # redis backend (Redis VSS) not yet implemented
     similarity_threshold: 0.92  # cosine similarity threshold (0.0 - 1.0)
     embedding_provider: "openai-1" # provider INSTANCE name (NOT type)
     embedding_model: "text-embedding-3-small"
@@ -126,8 +132,8 @@ redis:
   db: 0
   pool_size: 100
 
-virtual_keys:                   # Phase 4 (validated but unused until then)
-  enabled: false
+virtual_keys:
+  enabled: true
   keys:
     - key: "gw-team-frontend"
       description: "Frontend team"
