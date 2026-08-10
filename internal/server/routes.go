@@ -8,6 +8,7 @@ import (
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/middleware"
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/provider"
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/proxy"
+	"github.com/Jai-Keshav-Sharma/gatewai/internal/router"
 )
 
 // NewRoutes registers all routes and composes the middleware chain (§4.1).
@@ -18,7 +19,7 @@ import (
 func NewRoutes(cfg *config.Config, reg *provider.Registry, transport *http.Transport) http.Handler {
 	mux := http.NewServeMux()
 
-	chat := proxy.NewHandler(reg, transport)
+	chat := proxy.NewHandler(router.New(cfg, reg, transport))
 	mux.Handle("POST /v1/chat/completions", middleware.Chain(chat, middleware.BodyParser))
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {

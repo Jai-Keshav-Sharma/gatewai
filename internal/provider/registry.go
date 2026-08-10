@@ -64,6 +64,10 @@ var _ Provider = (*Instance)(nil)
 
 func (i *Instance) Name() string { return i.name }
 
+// Type returns the provider TYPE ("openai", "anthropic", "gemini") — the
+// adapter selector, distinct from the instance name.
+func (i *Instance) Type() string { return i.adapter.Name() }
+
 // APIKey returns this instance's provider API key (Phase 1: direct from config).
 func (i *Instance) APIKey() string { return i.apiKey }
 
@@ -181,9 +185,15 @@ func (r *Registry) Instances() []*Instance {
 	return out
 }
 
+// ByModel returns every instance that serves the given model, in config
+// order. Used by the router to build candidate sets.
+func (r *Registry) ByModel(model string) []*Instance {
+	return append([]*Instance(nil), r.byModel[model]...)
+}
+
 // Resolve returns an instance that serves the requested model.
-// Phase 1/2: returns the FIRST configured instance serving the model.
-// Phase 3 replaces this with the full router (strategies + failover).
+// Deprecated: Phase 3 replaced this with the router. Kept as a convenience
+// for non-routed lookups.
 func (r *Registry) Resolve(model string) (*Instance, bool) {
 	candidates := r.byModel[model]
 	if len(candidates) == 0 {

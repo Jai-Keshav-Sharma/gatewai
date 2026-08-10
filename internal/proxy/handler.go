@@ -1,17 +1,18 @@
 // Package proxy implements the core reverse-proxy handler: it receives the
-// parsed request from the middleware chain, dispatches it to a provider
-// instance, and writes the translated response back to the client (§4.1).
+// parsed request from the middleware chain, dispatches it through the router
+// (which owns retries, failover and circuit breakers), and writes the
+// translated response back to the client (§4.1).
 package proxy
 
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"io"
 	"net/http"
 
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/pool"
-	"github.com/Jai-Keshav-Sharma/gatewai/internal/provider"
+	"github.com/Jai-Keshav-Sharma/gatewai/internal/router"
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/schema"
 )
 
@@ -19,17 +20,13 @@ import (
 // constructor (dependency injection — no global state), so the handler is
 // stateless and safe for concurrent use by all requests.
 type Handler struct {
-	registry *provider.Registry
-	client   *http.Client
+	router *router.Router
 }
 
-// NewHandler builds the proxy handler with the shared upstream transport.
-// The transport is a singleton created once at startup (see server package).
-func NewHandler(reg *provider.Registry, transport *http.Transport) *Handler {
-	return &Handler{
-		registry: reg,
-		client:   &http.Client{Transport: transport},
-	}
+// NewHandler builds the proxy handler. Dispatch — including the HTTP client
+// and upstream transport — lives in the router.
+func NewHandler(r *router.Router) *Handler {
+	return &Handler{router: r}
 }
 
 // ServeHTTP handles a single /v1/chat/completions request.
@@ -49,46 +46,35 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	req := rc.ParsedRequest
 
-	inst, ok := h.registry.Resolve(req.Model)
-	if !ok {
-		schema.NewInvalidRequestError(fmt.Sprintf("model %q is not configured on any provider", req.Model)).WriteJSON(w)
+	res, err := h.router.Dispatch(r.Context(), req)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return // client gone — nothing to write, nothing to retry
+		}
+		var ge *schema.GatewaiError
+		if errors.As(err, &ge) {
+			ge.WriteJSON(w)
+			return
+		}
+		schema.NewInternalError(err.Error()).WriteJSON(w)
 		return
 	}
+
+	inst := res.Instance
 	rc.Provider = inst.Name()
 
-	// Per-provider timeout (config), layered on top of the client context.
-	// It bounds the whole upstream interaction, streaming included — this is
-	// the mechanism the plan relies on instead of a server WriteTimeout.
-	ctx, cancel := context.WithTimeout(r.Context(), inst.Timeout())
-	defer cancel()
-
-	// Build the upstream request with the CLIENT's context (via the derived
-	// ctx above): when the client disconnects, the upstream request is
-	// cancelled automatically, stopping the LLM from generating tokens we
-	// will never deliver (§10.4).
-	upstream, err := inst.BuildRequest(ctx, req, inst.APIKey())
-	if err != nil {
-		schema.NewInternalError("failed to build upstream request: " + err.Error()).WriteJSON(w)
-		return
-	}
-
-	resp, err := h.client.Do(upstream)
-	if err != nil {
-		schema.NewProviderError(fmt.Sprintf("upstream request failed: %v", err)).WriteJSON(w)
-		return
-	}
+	resp := res.Resp
 	defer resp.Body.Close()
 
-	// Phase 1 is a transparent proxy: provider errors pass through verbatim
-	// (status, headers, body). Unified error translation arrives with the
-	// governance and routing phases.
+	// A non-retryable 4xx passes through verbatim (the router already
+	// decided not to retry or fail over a client error).
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		h.passthrough(w, resp)
 		return
 	}
 
 	if req.Stream {
-		h.stream(w, resp, inst, ctx)
+		h.stream(w, resp, inst, r.Context())
 		return
 	}
 
