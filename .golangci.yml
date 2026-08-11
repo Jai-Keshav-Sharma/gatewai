@@ -12,7 +12,6 @@ linters:
     - ineffassign
     - unused
     - misspell
-    - gosimple
   settings:
     errcheck:
       check-blank: true

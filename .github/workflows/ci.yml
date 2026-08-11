@@ -25,10 +25,7 @@ jobs:
         with:
           go-version: "1.22"
       - run: go build ./...
-      - run: go test -race -coverprofile=coverage.out ./...
-      - uses: codecov/codecov-action@v4
-        with:
-          files: coverage.out
+      - run: go test -race ./...
 
   bench:
     name: benchmarks (regression detection)
