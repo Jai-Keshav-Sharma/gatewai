@@ -9,6 +9,9 @@ gatewai-load.yaml
 gatewai-load-mem.yaml
 .env
 
+# Internal working documents (not for public release)
+implementation_plan.md
+
 # Test artifacts
 coverage.out
 *.test
