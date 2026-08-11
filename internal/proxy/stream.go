@@ -74,7 +74,7 @@ func (h *Handler) stream(w http.ResponseWriter, resp *http.Response, inst *provi
 		}
 
 		if _, err := w.Write(translated); err != nil {
-			return // client went away — upstream is cancelled via the context
+			return // client went away — upstream is canceled via the context
 		}
 		if _, err := w.Write(newline); err != nil {
 			return

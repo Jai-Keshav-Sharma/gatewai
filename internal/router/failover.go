@@ -62,7 +62,7 @@ func (r *Router) dispatchType(ctx context.Context, req *schema.UnifiedRequest, m
 			}
 			resp, failure, err := r.doAttempt(ctx, req, inst, model)
 			if err != nil {
-				return nil, err // context cancelled / build failure — stop
+				return nil, err // context canceled / build failure — stop
 			}
 			attempt++
 			if failure == nil {

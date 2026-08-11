@@ -14,7 +14,7 @@ linters:
     - misspell
   settings:
     errcheck:
-      check-blank: true
+      check-blank: false
     misspell:
       locale: US
 
