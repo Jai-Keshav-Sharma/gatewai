@@ -55,8 +55,8 @@ func TestAnthropicStreamTranslation(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 		fl, _ := w.(http.Flusher)
 		writeEvent := func(event, payload string) {
-			fmt.Fprintf(w, "event: %s\n", event)
-			fmt.Fprintf(w, "data: %s\n\n", payload)
+			_, _ = fmt.Fprintf(w, "event: %s\n", event)
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
 			fl.Flush()
 		}
 		writeEvent("message_start", `{"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-4-20250514","usage":{"input_tokens":7}}}`)
@@ -104,9 +104,9 @@ func TestGeminiStreamTranslation(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 		fl, _ := w.(http.Flusher)
 		chunk := `{"candidates":[{"content":{"role":"model","parts":[{"text":"Ciao"}]}}]}`
-		fmt.Fprintf(w, "data: %s\n\n", chunk)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", chunk)
 		final := `{"candidates":[{"content":{"parts":[]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":9,"candidatesTokenCount":2,"totalTokenCount":11}}`
-		fmt.Fprintf(w, "data: %s\n\n", final)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", final)
 		fl.Flush()
 	}))
 	defer mock.Close()

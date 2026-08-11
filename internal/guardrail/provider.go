@@ -69,7 +69,7 @@ func (g *ProviderGuard) moderate(ctx context.Context, text string) (*Verdict, er
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("provider guard: status %d", resp.StatusCode)
 	}
