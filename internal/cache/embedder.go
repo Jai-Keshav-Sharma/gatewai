@@ -46,7 +46,7 @@ func (e *HTTPEmbedder) Embed(ctx context.Context, text string) ([]float32, error
 	if err != nil {
 		return nil, fmt.Errorf("embed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("embed: status %d", resp.StatusCode)
 	}

@@ -94,7 +94,7 @@ func BenchmarkProxyHandler(b *testing.B) {
 			b.Fatal(err)
 		}
 		_, _ = io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			b.Fatalf("status %d", resp.StatusCode)
 		}

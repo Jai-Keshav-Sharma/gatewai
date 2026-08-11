@@ -66,7 +66,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rc.ResolvedKey = inst.APIKey()
 
 	resp := res.Resp
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// A non-retryable 4xx passes through verbatim (the router already
 	// decided not to retry or fail over a client error).

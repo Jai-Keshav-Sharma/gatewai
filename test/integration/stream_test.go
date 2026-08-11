@@ -152,7 +152,7 @@ func TestModelsEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("no key: status = %d, want 401", resp.StatusCode)
 	}
@@ -164,7 +164,7 @@ func TestModelsEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var out struct {
 		Data []struct {
 			ID string `json:"id"`

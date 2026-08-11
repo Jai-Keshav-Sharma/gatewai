@@ -141,7 +141,7 @@ func post(t *testing.T, gw *httptest.Server, key, body string) (string, int) {
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, _ := io.ReadAll(resp.Body)
 	return string(data), resp.StatusCode
 }
