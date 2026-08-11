@@ -15,13 +15,16 @@ import (
 // (403 otherwise — §8.2).
 // With virtual keys DISABLED the gateway accepts any non-empty Bearer token
 // (a raw provider key, §8.2).
+//
+// It also works standalone (no RequestContext): routes like /v1/models are
+// under /v1/* and therefore require authentication (§8.2), but have no
+// parsed body — the model-permission check is skipped in that case.
 func Auth(enabled bool, store *virtualkey.Store) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			rc := schema.RequestContextFrom(r.Context())
-			if rc == nil || rc.ParsedRequest == nil {
-				next.ServeHTTP(w, r)
-				return
+			if rc == nil {
+				rc = &schema.RequestContext{}
 			}
 
 			token, ok := bearerToken(r)
@@ -37,7 +40,7 @@ func Auth(enabled bool, store *virtualkey.Store) Middleware {
 					schema.NewAuthenticationError("invalid API key").WriteJSON(w)
 					return
 				}
-				if !key.Allows(rc.ParsedRequest.Model) {
+				if rc.ParsedRequest != nil && !key.Allows(rc.ParsedRequest.Model) {
 					schema.NewPermissionError(
 						"key " + token + " is not allowed to use model " + rc.ParsedRequest.Model,
 					).WriteJSON(w)

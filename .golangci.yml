@@ -1,0 +1,29 @@
+# golangci-lint configuration (strict).
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  enable:
+    - errcheck        # unchecked errors are bugs waiting to happen
+    - govet           # suspicious constructs
+    - staticcheck     # broad static analysis
+    - ineffassign     # assigned but never used
+    - unused          # unused code
+    - misspell        # typos in comments
+    - gosimple        # simplify code
+  disable:
+    - gochecknoglobals # pool vars are intentional; see also gochecknoinits
+
+linters-settings:
+  errcheck:
+    check-blank: true
+  misspell:
+    locale: US
+
+issues:
+  exclude-rules:
+    # test helpers intentionally ignore some writes
+    - path: _test\.go
+      linters:
+        - errcheck

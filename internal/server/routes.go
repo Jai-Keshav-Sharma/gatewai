@@ -3,6 +3,7 @@ package server
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/cache"
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/config"
+	"github.com/Jai-Keshav-Sharma/gatewai/internal/guardrail"
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/metrics"
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/middleware"
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/provider"
@@ -57,7 +59,11 @@ func NewRoutes(cfg *config.Config, reg *provider.Registry, transport *http.Trans
 		return nil, err
 	}
 	// Full §4.1 chain: 0 bodyparser → 1 requestid → 2 logger → 3 metrics →
-	// 4 auth → 5 rate limit → 6 cache → proxy handler.
+	// 4 auth → 5 rate limit → 6 cache → 7 guardrail → proxy handler.
+	guards, err := buildGuards(cfg, reg, transport)
+	if err != nil {
+		return nil, err
+	}
 	chat = middleware.Chain(chat,
 		middleware.BodyParser,
 		middleware.RequestID(),
@@ -77,8 +83,27 @@ func NewRoutes(cfg *config.Config, reg *provider.Registry, transport *http.Trans
 			embedderFor(cfg, reg, transport),
 			time.Duration(cfg.Cache.Semantic.TTL),
 		).Middleware(),
+		middleware.NewGuardrail(guards.pre, guards.post, cfg.Guardrails.BufferMode).Middleware(),
 	)
 	mux.Handle("POST /v1/chat/completions", chat)
+
+	// GET /v1/models (§8.1): list every model across all providers, with the
+	// same authentication as other /v1/* routes (§8.2).
+	mux.Handle("GET /v1/models", middleware.Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var models []map[string]string
+		for _, inst := range reg.Instances() {
+			for _, m := range inst.Models() {
+				models = append(models, map[string]string{
+					"id":       m.ID,
+					"object":   "model",
+					"owned_by": inst.Name(),
+				})
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": models})
+	}), middleware.Auth(cfg.VirtualKeys.Enabled, keyStore)))
 
 	// Prometheus scrape endpoint (§8.1) — not under /v1, so it stays open.
 	if cfg.Metrics.Enabled {
@@ -185,6 +210,54 @@ func buildCache(cfg *config.Config, reg *provider.Registry, redisClient *redis.C
 		c = cache.NewMemorySemantic(c)
 	}
 	return c, nil
+}
+
+// guardSet holds the built pre-request and post-response classifiers.
+type guardSet struct {
+	pre  []guardrail.Guard
+	post []guardrail.Guard
+}
+
+// buildGuards constructs the configured classifiers (§7 guardrails block).
+// Guard references point at provider INSTANCES (llm/provider types) or URLs
+// (webhook type) — all validated at config load time.
+func buildGuards(cfg *config.Config, reg *provider.Registry, transport *http.Transport) (guardSet, error) {
+	client := &http.Client{Transport: transport}
+	build := func(list []config.GuardConfig, set *[]guardrail.Guard) error {
+		for _, gc := range list {
+			switch gc.Type {
+			case "llm":
+				inst, ok := reg.Get(gc.Provider)
+				if !ok {
+					return fmt.Errorf("guardrail: unknown provider instance %q", gc.Provider)
+				}
+				*set = append(*set, guardrail.NewLLMGuard(
+					"llm:"+gc.Provider+":"+gc.Model,
+					inst.BaseURL(), inst.APIKey(), gc.Model, gc.Prompt, gc.Threshold,
+					time.Duration(gc.Timeout), client))
+			case "webhook":
+				*set = append(*set, guardrail.NewWebhookGuard(
+					"webhook:"+gc.URL, gc.URL, time.Duration(gc.Timeout), client))
+			case "provider":
+				inst, ok := reg.Get(gc.Provider)
+				if !ok {
+					return fmt.Errorf("guardrail: unknown provider instance %q", gc.Provider)
+				}
+				*set = append(*set, guardrail.NewProviderGuard(
+					"provider:"+gc.Provider, inst.BaseURL(), inst.APIKey(),
+					time.Duration(gc.Timeout), client))
+			}
+		}
+		return nil
+	}
+	gs := guardSet{}
+	if err := build(cfg.Guardrails.PreRequest, &gs.pre); err != nil {
+		return gs, err
+	}
+	if err := build(cfg.Guardrails.PostResponse, &gs.post); err != nil {
+		return gs, err
+	}
+	return gs, nil
 }
 
 // pricerFor builds the metric pricing resolver from the registries' catalogs:
