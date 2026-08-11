@@ -5,6 +5,9 @@ bin/
 # Local config files (contain real API keys via env refs; the example is safe)
 gatewai.yaml
 configs/gatewai.yaml
+gatewai-load.yaml
+gatewai-load-mem.yaml
+.env
 
 # Test artifacts
 coverage.out
