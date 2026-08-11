@@ -98,13 +98,27 @@ func (h *Handler) stream(w http.ResponseWriter, resp *http.Response, inst *provi
 		}
 	}
 
-	// Publish the reconstructed response for the cache store (only on a
-	// clean stream — aborted streams carry no cached content).
-	if acc != nil && scanner.Err() == nil {
-		ur := acc.Response()
-		recordTokens(schema.RequestContextFrom(ctx), ur.Usage)
-		if slot := cache.ResponseSlotFrom(ctx); slot != nil {
-			slot.Set(ur)
+	// On a clean stream: capture the per-provider usage the adapter
+	// extracted from its events (§4.1 step 10 — OpenAI include_usage chunk /
+	// Anthropic message_start+message_delta / Gemini usageMetadata), record
+	// it on the request (metrics + TPM post-charge), and attach it to the
+	// reconstructed cached response so cache hits are charged too.
+	if scanner.Err() == nil {
+		var usage *schema.Usage
+		if us, ok := schema.StreamStateFrom(ctx).(schema.UsageSource); ok {
+			usage = us.Usage()
+		}
+		if usage != nil {
+			recordTokens(schema.RequestContextFrom(ctx), usage)
+		}
+		if acc != nil {
+			ur := acc.Response()
+			if usage != nil {
+				ur.Usage = usage
+			}
+			if slot := cache.ResponseSlotFrom(ctx); slot != nil {
+				slot.Set(ur)
+			}
 		}
 	}
 }

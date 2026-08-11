@@ -11,12 +11,17 @@ import (
 )
 
 // streamState tracks the tool_calls index across chunks (Gemini function
-// call parts carry no index of their own) and the synthesized chunk id.
+// call parts carry no index of their own), the synthesized chunk id, and
+// token usage from the final chunk's usageMetadata (§4.1 step 10).
 type streamState struct {
 	nextTool int
 	id       string
 	created  int64
+	usage    *schema.Usage
 }
+
+// Usage implements schema.UsageSource (read by the proxy after the stream).
+func (s *streamState) Usage() *schema.Usage { return s.usage }
 
 // NewStreamState creates the per-stream state (needed for tool call indices).
 func (a *Adapter) NewStreamState() any {
@@ -55,8 +60,15 @@ func (a *Adapter) TranslateStreamChunk(ctx context.Context, chunk []byte) ([]byt
 	if err := json.Unmarshal(payload, &gr); err != nil {
 		return nil, nil // not JSON — skip
 	}
+	if gr.UsageMetadata != nil {
+		st.usage = &schema.Usage{
+			PromptTokens:     gr.UsageMetadata.PromptTokenCount,
+			CompletionTokens: gr.UsageMetadata.CandidatesTokenCount,
+			TotalTokens:      gr.UsageMetadata.TotalTokenCount,
+		}
+	}
 	if len(gr.Candidates) == 0 {
-		return nil, nil // e.g. usageMetadata-only chunk (metrics handle it in Phase 5)
+		return nil, nil // e.g. usageMetadata-only chunk — captured, nothing to emit
 	}
 	cand := gr.Candidates[0]
 

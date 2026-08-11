@@ -10,12 +10,15 @@ import (
 
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/cache"
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/config"
+	"github.com/Jai-Keshav-Sharma/gatewai/internal/metrics"
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/middleware"
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/provider"
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/proxy"
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/ratelimit"
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/router"
+	"github.com/Jai-Keshav-Sharma/gatewai/internal/schema"
 	"github.com/Jai-Keshav-Sharma/gatewai/internal/virtualkey"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -53,8 +56,13 @@ func NewRoutes(cfg *config.Config, reg *provider.Registry, transport *http.Trans
 	if err != nil {
 		return nil, err
 	}
+	// Full §4.1 chain: 0 bodyparser → 1 requestid → 2 logger → 3 metrics →
+	// 4 auth → 5 rate limit → 6 cache → proxy handler.
 	chat = middleware.Chain(chat,
 		middleware.BodyParser,
+		middleware.RequestID(),
+		middleware.Logger(),
+		middleware.Metrics(cfg.Metrics.Enabled, pricerFor(reg)),
 		middleware.Auth(cfg.VirtualKeys.Enabled, keyStore),
 		middleware.NewRateLimit(limiter, cfg.RateLimiting.Enabled,
 			est,
@@ -71,6 +79,11 @@ func NewRoutes(cfg *config.Config, reg *provider.Registry, transport *http.Trans
 		).Middleware(),
 	)
 	mux.Handle("POST /v1/chat/completions", chat)
+
+	// Prometheus scrape endpoint (§8.1) — not under /v1, so it stays open.
+	if cfg.Metrics.Enabled {
+		mux.Handle(cfg.Metrics.Path, promhttp.Handler())
+	}
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -172,6 +185,30 @@ func buildCache(cfg *config.Config, reg *provider.Registry, redisClient *redis.C
 		c = cache.NewMemorySemantic(c)
 	}
 	return c, nil
+}
+
+// pricerFor builds the metric pricing resolver from the registries' catalogs:
+// provider (INSTANCE name) + model → USD per 1M tokens.
+func pricerFor(reg *provider.Registry) metrics.Pricer {
+	prices := make(map[string]map[string]schema.Model)
+	for _, inst := range reg.Instances() {
+		m := make(map[string]schema.Model)
+		for _, model := range inst.Models() {
+			m[model.ID] = model
+		}
+		prices[inst.Name()] = m
+	}
+	return func(provider, model string) (float64, float64, bool) {
+		models, ok := prices[provider]
+		if !ok {
+			return 0, 0, false
+		}
+		m, ok := models[model]
+		if !ok {
+			return 0, 0, false
+		}
+		return m.InputPricePer1M, m.OutputPricePer1M, true
+	}
 }
 
 // embedderFor builds the embeddings client for semantic caching (§7: the

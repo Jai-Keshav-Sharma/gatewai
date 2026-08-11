@@ -27,6 +27,17 @@ type Usage struct {
 	TotalTokens      int `json:"total_tokens"`
 }
 
+// UsageSource is implemented by adapter per-stream states that capture token
+// usage while translating a stream. The proxy reads it after the stream
+// completes so metrics and the TPM post-charge see the real token counts
+// (§4.1 step 10: OpenAI include_usage chunk / Anthropic message_start +
+// message_delta / Gemini usageMetadata). Defined here — not in the provider
+// package — so the adapters can implement it without an import cycle.
+type UsageSource interface {
+	// Usage returns the tokens captured so far (nil if none seen yet).
+	Usage() *Usage
+}
+
 // StreamChunk is the payload of an OpenAI-format SSE chunk (§4.2).
 // It is the wire shape the client receives, shared by every adapter that
 // translates foreign SSE streams into the OpenAI format.

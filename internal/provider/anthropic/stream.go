@@ -14,15 +14,31 @@ import (
 //     emitted chunk
 //   - the mapping from Anthropic content-block indices (which span ALL block
 //     types) to OpenAI tool_calls indices (which count only tool calls)
+//   - token usage: input tokens from message_start, output tokens from
+//     message_delta (§4.1 step 10), read by the proxy after the stream
 //
 // The adapter is a shared singleton, so this state is per-STREAM: created by
 // the proxy via NewStreamState and carried in the context.
 type streamState struct {
-	messageID   string
-	model       string
-	created     int64
-	blockToTool map[int]int
-	nextTool    int
+	messageID    string
+	model        string
+	created      int64
+	blockToTool  map[int]int
+	nextTool     int
+	inputTokens  int
+	outputTokens int
+}
+
+// Usage implements schema.UsageSource (read by the proxy after the stream).
+func (s *streamState) Usage() *schema.Usage {
+	if s.inputTokens == 0 && s.outputTokens == 0 {
+		return nil
+	}
+	return &schema.Usage{
+		PromptTokens:     s.inputTokens,
+		CompletionTokens: s.outputTokens,
+		TotalTokens:      s.inputTokens + s.outputTokens,
+	}
 }
 
 // NewStreamState creates the per-stream state (Anthropic streams need it).
@@ -69,6 +85,9 @@ func (a *Adapter) TranslateStreamChunk(ctx context.Context, chunk []byte) ([]byt
 			st.messageID = ev.Message.ID
 			st.model = ev.Message.Model
 			st.created = time.Now().Unix()
+			if ev.Message.Usage != nil {
+				st.inputTokens = ev.Message.Usage.InputTokens
+			}
 		}
 		// First chunk: announce the assistant role, like OpenAI does.
 		return emitChunk(st, map[string]any{"role": "assistant"}, nil)
@@ -115,9 +134,14 @@ func (a *Adapter) TranslateStreamChunk(ctx context.Context, chunk []byte) ([]byt
 
 	case "message_delta":
 		// Final chunk: carry the finish_reason (and close the delta object).
+		// Note: output token usage arrives at the EVENT level ("usage"), not
+		// inside "delta" (§4.1 step 10).
 		var fr *string
 		if d := ev.Delta; d != nil {
 			fr = mapFinishReason(d.StopReason)
+		}
+		if ev.Usage != nil {
+			st.outputTokens = ev.Usage.OutputTokens
 		}
 		return emitChunk(st, map[string]any{}, fr)
 
@@ -155,11 +179,17 @@ type anthropicEvent struct {
 	Index        *int                    `json:"index"`
 	ContentBlock *anthropicContentBlock  `json:"content_block"`
 	Delta        *anthropicStreamDelta   `json:"delta"`
+	Usage        *struct {
+		OutputTokens int `json:"output_tokens"`
+	} `json:"usage"`
 }
 
 type anthropicStreamMessage struct {
 	ID    string `json:"id"`
 	Model string `json:"model"`
+	Usage *struct {
+		InputTokens int `json:"input_tokens"`
+	} `json:"usage"`
 }
 
 type anthropicStreamDelta struct {

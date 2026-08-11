@@ -27,6 +27,16 @@ func (a *Adapter) Name() string { return "openai" }
 func (a *Adapter) BuildRequest(ctx context.Context, req *schema.UnifiedRequest, opts schema.BuildOptions) (*http.Request, error) {
 	endpoint := strings.TrimSuffix(opts.BaseURL, "/") + "/chat/completions"
 
+	// Streaming metrics rule (§4.1 step 10): if the client did NOT set
+	// stream_options.include_usage, inject it so the upstream sends a final
+	// usage chunk. The translator strips that chunk from the client stream
+	// (it was never asked for) while capturing it for metrics.
+	if req.Stream && (req.StreamOptions == nil || !req.StreamOptions.IncludeUsage) {
+		injected := *req
+		injected.StreamOptions = &schema.StreamOptions{IncludeUsage: true}
+		req = &injected
+	}
+
 	// Our schema IS the OpenAI wire format, so marshaling the unified request
 	// produces a byte-for-byte compatible body (including stream: true).
 	body, err := json.Marshal(req)
